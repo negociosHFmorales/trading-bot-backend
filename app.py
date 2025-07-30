@@ -6,7 +6,7 @@ import requests
 from datetime import datetime, time
 import pytz
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # Configuration de acciones (20 acciones diversificadas)
 SYMBOLS = [
