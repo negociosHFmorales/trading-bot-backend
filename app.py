@@ -327,7 +327,22 @@ def health_check():
         "symbols_count": len(SYMBOLS),
         "version": "2.0"
     })
+from datetime import datetime
+import pytz
 
+@app.route('/health')
+def health_check():
+    return {
+        "status": "OK",
+        "timestamp": datetime.now().isoformat(),
+        "market_open": True,
+        "symbols_count": 20,
+        "version": "2.0"
+    }
+
+@app.route('/ping')
+def ping():
+    return {"message": "pong", "timestamp": datetime.now().isoformat()}
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 10000))
