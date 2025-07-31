@@ -29,6 +29,9 @@ SYMBOLS = [
     'TSLA', 'DIS', 'KO', 'WMT'
 ]
 
+# Símbolos prioritarios para análisis de sentimiento (para conservar API calls)
+SENTIMENT_PRIORITY_SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN', 'META', 'NVDA', 'NFLX']
+
 # Cache simple para evitar rate limiting
 CACHE = {}
 CACHE_DURATION = 300  # 5 minutos
@@ -143,8 +146,147 @@ def calcular_indicadores_avanzados(data):
         logger.error(f"Error calculating indicators: {e}")
         return None
 
-def evaluar_senal_avanzada(indicators):
-    """Sistema de puntuacion avanzado para senales con mejor scoring"""
+@cache_result(600)  # Cache por 10 minutos para sentimiento
+def analizar_sentimiento_noticias(symbol, api_key="TU_NEWSAPI_KEY_AQUI"):
+    """Análisis de sentimiento basado en noticias mejorado e integrado"""
+    try:
+        url = f"https://newsapi.org/v2/everything"
+        params = {
+            'q': f'{symbol} stock OR {symbol} earnings OR {symbol} revenue OR {symbol} quarter',
+            'language': 'en',
+            'sortBy': 'publishedAt',
+            'pageSize': 12,
+            'apiKey': api_key,
+            'from': (datetime.now() - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
+        }
+        
+        response = requests.get(url, params=params, timeout=15)
+        if response.status_code != 200:
+            logger.warning(f"NewsAPI returned status {response.status_code} for {symbol}")
+            return {
+                'sentiment_score': 0,
+                'news_count': 0,
+                'sentiment_label': 'NO_DATA',
+                'confidence': 0,
+                'news_articles': []
+            }
+        
+        noticias = response.json().get('articles', [])
+        
+        # Palabras clave mejoradas y categorizadas
+        palabras_muy_positivas = [
+            'surge', 'soars', 'rally', 'breakthrough', 'earnings beat', 'revenue growth',
+            'outperform', 'bullish', 'record high', 'strong momentum', 'upgrade'
+        ]
+        
+        palabras_positivas = [
+            'gains', 'profit', 'growth', 'beat', 'strong', 'positive', 'rise',
+            'expansion', 'innovation', 'partnership', 'acquisition', 'dividend'
+        ]
+        
+        palabras_muy_negativas = [
+            'crash', 'plunge', 'disappointing', 'earnings miss', 'revenue decline',
+            'underperform', 'bearish', 'selloff', 'recession', 'bankruptcy'
+        ]
+        
+        palabras_negativas = [
+            'falls', 'drops', 'decline', 'loss', 'downgrade', 'miss', 'weak',
+            'concern', 'negative', 'volatility', 'uncertainty', 'lawsuit'
+        ]
+        
+        sentiment_score = 0
+        noticias_analizadas = 0
+        noticias_procesadas = []
+        
+        for noticia in noticias[:10]:  # Primeras 10 noticias
+            titulo = noticia.get('title', '').lower()
+            descripcion = noticia.get('description', '').lower() if noticia.get('description') else ''
+            
+            # Peso mayor para el título (3x), menor para descripción (1x)
+            puntos_muy_positivos_titulo = sum(3 for palabra in palabras_muy_positivas if palabra in titulo)
+            puntos_positivos_titulo = sum(2 for palabra in palabras_positivas if palabra in titulo)
+            puntos_muy_negativos_titulo = sum(3 for palabra in palabras_muy_negativas if palabra in titulo)
+            puntos_negativos_titulo = sum(2 for palabra in palabras_negativas if palabra in titulo)
+            
+            puntos_muy_positivos_desc = sum(1 for palabra in palabras_muy_positivas if palabra in descripcion)
+            puntos_positivos_desc = sum(0.5 for palabra in palabras_positivas if palabra in descripcion)
+            puntos_muy_negativos_desc = sum(1 for palabra in palabras_muy_negativas if palabra in descripcion)
+            puntos_negativos_desc = sum(0.5 for palabra in palabras_negativas if palabra in descripcion)
+            
+            puntos_totales = (
+                puntos_muy_positivos_titulo + puntos_positivos_titulo + 
+                puntos_muy_positivos_desc + puntos_positivos_desc
+            ) - (
+                puntos_muy_negativos_titulo + puntos_negativos_titulo + 
+                puntos_muy_negativos_desc + puntos_negativos_desc
+            )
+            
+            sentiment_score += puntos_totales
+            noticias_analizadas += 1
+            
+            # Determinar sentimiento individual de la noticia
+            if puntos_totales > 2:
+                noticia_sentiment = 'MUY_POSITIVO'
+            elif puntos_totales > 0:
+                noticia_sentiment = 'POSITIVO'
+            elif puntos_totales < -2:
+                noticia_sentiment = 'MUY_NEGATIVO'
+            elif puntos_totales < 0:
+                noticia_sentiment = 'NEGATIVO'
+            else:
+                noticia_sentiment = 'NEUTRAL'
+            
+            noticias_procesadas.append({
+                'title': noticia.get('title', ''),
+                'url': noticia.get('url', ''),
+                'published': noticia.get('publishedAt', ''),
+                'sentiment': noticia_sentiment,
+                'score': round(puntos_totales, 1),
+                'source': noticia.get('source', {}).get('name', 'Unknown')
+            })
+        
+        if noticias_analizadas > 0:
+            sentiment_score = sentiment_score / noticias_analizadas
+        
+        # Determinar etiqueta y confianza
+        if sentiment_score > 1.5:
+            sentiment_label = 'MUY_POSITIVO'
+            confidence = min(0.9, abs(sentiment_score) * 0.2)
+        elif sentiment_score > 0.5:
+            sentiment_label = 'POSITIVO'
+            confidence = min(0.8, abs(sentiment_score) * 0.15)
+        elif sentiment_score < -1.5:
+            sentiment_label = 'MUY_NEGATIVO'
+            confidence = min(0.9, abs(sentiment_score) * 0.2)
+        elif sentiment_score < -0.5:
+            sentiment_label = 'NEGATIVO'
+            confidence = min(0.8, abs(sentiment_score) * 0.15)
+        else:
+            sentiment_label = 'NEUTRAL'
+            confidence = 0.5
+        
+        return {
+            'sentiment_score': round(sentiment_score, 3),
+            'news_count': noticias_analizadas,
+            'sentiment_label': sentiment_label,
+            'confidence': round(confidence, 3),
+            'news_articles': noticias_procesadas[:5],  # Solo las primeras 5 para respuesta
+            'analysis_time': datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing sentiment for {symbol}: {e}")
+        return {
+            'sentiment_score': 0,
+            'news_count': 0,
+            'sentiment_label': 'ERROR',
+            'confidence': 0,
+            'error': str(e),
+            'news_articles': []
+        }
+
+def evaluar_senal_avanzada(indicators, sentiment_data=None):
+    """Sistema de puntuacion avanzado con análisis de sentimiento integrado"""
     puntos_compra = 0
     puntos_venta = 0
     razones = []
@@ -164,6 +306,12 @@ def evaluar_senal_avanzada(indicators):
         elif rsi > 65:
             puntos_venta += 1.5
             razones.append(f"RSI sobrecompra ({rsi:.1f})")
+        elif rsi < 40:
+            puntos_compra += 1
+            razones.append(f"RSI favorable compra ({rsi:.1f})")
+        elif rsi > 60:
+            puntos_venta += 1
+            razones.append(f"RSI favorable venta ({rsi:.1f})")
         
         # MACD Analysis (peso: 2 puntos max)
         macd = indicators['macd']
@@ -196,7 +344,7 @@ def evaluar_senal_avanzada(indicators):
             razones.append("Tendencia alcista muy fuerte")
         elif precio > sma_20 > sma_50:
             puntos_compra += 1.5
-            razones.append("Tendencia alcista fuerte")
+            razones.append("Tendencia alcista fuerte (SMA)")
         elif precio > sma_20:
             puntos_compra += 1
             razones.append("Tendencia alcista corto plazo")
@@ -205,7 +353,7 @@ def evaluar_senal_avanzada(indicators):
             razones.append("Tendencia bajista muy fuerte")
         elif precio < sma_20 < sma_50:
             puntos_venta += 1.5
-            razones.append("Tendencia bajista fuerte")
+            razones.append("Tendencia bajista fuerte (SMA)")
         elif precio < sma_20:
             puntos_venta += 1
             razones.append("Tendencia bajista corto plazo")
@@ -213,14 +361,13 @@ def evaluar_senal_avanzada(indicators):
         # Bollinger Bands (peso: 1 punto max)
         bb_upper = indicators['bb_upper']
         bb_lower = indicators['bb_lower']
-        bb_middle = indicators['bb_middle']
         
         if precio <= bb_lower:
             puntos_compra += 1
-            razones.append("Precio en banda inferior Bollinger")
+            razones.append("Precio en banda inferior (oportunidad)")
         elif precio >= bb_upper:
             puntos_venta += 1
-            razones.append("Precio en banda superior Bollinger")
+            razones.append("Precio en banda superior (cuidado)")
         
         # Volume Analysis (peso: 1 punto max)
         volume_ratio = indicators['volume_ratio']
@@ -237,7 +384,32 @@ def evaluar_senal_avanzada(indicators):
                 razones.append(f"Alto volumen apoya señal ({volume_ratio:.1f}x)")
             else:
                 puntos_venta += 0.5
-                razones.append(f"Alto volumen apoya señal ({volume_ratio:.1f}x)")
+                razones.append(f"Alto volumen confirma venta")
+        
+        # ANÁLISIS DE SENTIMIENTO INTEGRADO (peso: 2.5 puntos max)
+        if sentiment_data and sentiment_data['news_count'] > 0:
+            sentiment_score = sentiment_data['sentiment_score']
+            sentiment_label = sentiment_data['sentiment_label']
+            confidence = sentiment_data['confidence']
+            news_count = sentiment_data['news_count']
+            
+            # Aplicar peso basado en confianza del sentimiento
+            peso_sentimiento = confidence * 2.5
+            
+            if sentiment_label == 'MUY_POSITIVO':
+                puntos_compra += peso_sentimiento
+                razones.append(f"📈 Sentimiento muy positivo ({news_count} noticias, score: {sentiment_score:.1f})")
+            elif sentiment_label == 'POSITIVO':
+                puntos_compra += peso_sentimiento * 0.6
+                razones.append(f"📊 Sentimiento positivo ({news_count} noticias)")
+            elif sentiment_label == 'MUY_NEGATIVO':
+                puntos_venta += peso_sentimiento
+                razones.append(f"📉 Sentimiento muy negativo ({news_count} noticias, score: {sentiment_score:.1f})")
+            elif sentiment_label == 'NEGATIVO':
+                puntos_venta += peso_sentimiento * 0.6
+                razones.append(f"📊 Sentimiento negativo ({news_count} noticias)")
+            else:
+                razones.append(f"📰 Sentimiento neutral ({news_count} noticias)")
         
         # Momentum Analysis (peso: 1 punto max)
         momentum = indicators['momentum']
@@ -256,14 +428,17 @@ def evaluar_senal_avanzada(indicators):
             puntos_compra *= 0.8
             puntos_venta *= 0.8
         
-        # Decision Final (umbral más inteligente)
-        total_puntos = max(puntos_compra, puntos_venta)
+        # Decision Final con umbral ajustado por sentimiento
+        umbral_base = 3.0
+        # Si tenemos datos de sentimiento muy confiables, bajamos el umbral
+        if sentiment_data and sentiment_data.get('confidence', 0) > 0.7:
+            umbral_base = 2.5
         
-        if puntos_compra >= 3.5 and puntos_compra > puntos_venta + 0.5:
-            confianza = min(0.95, (puntos_compra / 8) + 0.3)  # Normalizado entre 0.3-0.95
+        if puntos_compra >= umbral_base and puntos_compra > puntos_venta + 0.5:
+            confianza = min(0.95, (puntos_compra / 9) + 0.25)  # Normalizado por más factores
             return "BUY", confianza, razones
-        elif puntos_venta >= 3.5 and puntos_venta > puntos_compra + 0.5:
-            confianza = min(0.95, (puntos_venta / 8) + 0.3)
+        elif puntos_venta >= umbral_base and puntos_venta > puntos_compra + 0.5:
+            confianza = min(0.95, (puntos_venta / 9) + 0.25)
             return "SELL", confianza, razones
         
         return None, 0, razones
@@ -272,79 +447,6 @@ def evaluar_senal_avanzada(indicators):
         logger.error(f"Error evaluating signal: {e}")
         return None, 0, ["Error en análisis"]
 
-def analizar_sentimiento_noticias(symbol):
-    """Análisis de sentimiento basado en noticias"""
-    api_key = "TU_NEWSAPI_KEY_AQUI"  # Reemplaza con tu key
-    try:
-        url = f"https://newsapi.org/v2/everything"
-        params = {
-            'q': f'{symbol} stock',
-            'language': 'en',
-            'sortBy': 'publishedAt',
-            'pageSize': 10,
-            'apiKey': api_key
-        }
-        
-        response = requests.get(url, params=params, timeout=10)
-        noticias = response.json().get('articles', [])
-        
-        # Palabras clave para análisis
-        palabras_positivas = [
-            'surge', 'soars', 'gains', 'profit', 'growth', 'bullish', 
-            'upgrade', 'beat', 'strong', 'record', 'positive', 'rise',
-            'outperform', 'breakthrough', 'expansion', 'innovation'
-        ]
-        
-        palabras_negativas = [
-            'falls', 'drops', 'decline', 'loss', 'bearish', 'downgrade', 
-            'miss', 'weak', 'concern', 'negative', 'crash', 'plunge',
-            'underperform', 'recession', 'layoffs', 'scandal'
-        ]
-        
-        sentiment_score = 0
-        noticias_analizadas = 0
-        noticias_procesadas = []
-        
-        for noticia in noticias[:5]:  # Solo primeras 5
-            titulo = noticia.get('title', '').lower()
-            descripcion = noticia.get('description', '').lower()
-            texto_completo = f"{titulo} {descripcion}"
-            
-            puntos_positivos = sum(1 for palabra in palabras_positivas if palabra in texto_completo)
-            puntos_negativos = sum(1 for palabra in palabras_negativas if palabra in texto_completo)
-            
-            noticia_sentiment = puntos_positivos - puntos_negativos
-            sentiment_score += noticia_sentiment
-            noticias_analizadas += 1
-            
-            noticias_procesadas.append({
-                'title': noticia.get('title', ''),
-                'url': noticia.get('url', ''),
-                'published': noticia.get('publishedAt', ''),
-                'sentiment': 'POSITIVO' if noticia_sentiment > 0 else 'NEGATIVO' if noticia_sentiment < 0 else 'NEUTRAL',
-                'score': noticia_sentiment
-            })
-        
-        if noticias_analizadas > 0:
-            sentiment_score = sentiment_score / noticias_analizadas
-            
-        return {
-            'sentiment_score': round(sentiment_score, 2),
-            'news_count': noticias_analizadas,
-            'sentiment_label': 'POSITIVO' if sentiment_score > 0.5 else 'NEGATIVO' if sentiment_score < -0.5 else 'NEUTRAL',
-            'news_articles': noticias_procesadas
-        }
-        
-    except Exception as e:
-        logger.error(f"Error analyzing sentiment for {symbol}: {e}")
-        return {
-            'sentiment_score': 0,
-            'news_count': 0,
-            'sentiment_label': 'NO_DATA',
-            'error': str(e),
-            'news_articles': []
-        }
-
 def calcular_gestion_riesgo(precio, accion, confianza, volatility=0.02):
     """Gestion avanzada de riesgo con volatilidad"""
     try:
@@ -352,7 +454,7 @@ def calcular_gestion_riesgo(precio, accion, confianza, volatility=0.02):
         riesgo_base = 0.02  # 2% base
         
         # Ajustar riesgo por volatilidad
-        riesgo_ajustado_vol = riesgo_base * (1 + volatility * 2)  # Más riesgo = menos posición
+        riesgo_ajustado_vol = riesgo_base * (1 + volatility * 2)
         riesgo_ajustado_vol = min(riesgo_ajustado_vol, 0.05)  # Máximo 5%
         
         # Factor de confianza
@@ -360,11 +462,11 @@ def calcular_gestion_riesgo(precio, accion, confianza, volatility=0.02):
         riesgo_final = riesgo_ajustado_vol * factor_confianza
         
         # Stop loss y take profit dinámicos basados en volatilidad
-        vol_multiplier = max(1, volatility * 20)  # Volatilidad como multiplicador
+        vol_multiplier = max(1, volatility * 20)
         
         if accion == "BUY":
-            stop_loss = precio * (1 - 0.03 * vol_multiplier)  # 3% base * volatilidad
-            take_profit = precio * (1 + 0.06 * vol_multiplier)  # 6% base * volatilidad
+            stop_loss = precio * (1 - 0.03 * vol_multiplier)
+            take_profit = precio * (1 + 0.06 * vol_multiplier)
         else:
             stop_loss = precio * (1 + 0.03 * vol_multiplier)
             take_profit = precio * (1 - 0.06 * vol_multiplier)
@@ -397,13 +499,12 @@ def calcular_gestion_riesgo(precio, accion, confianza, volatility=0.02):
 @app.route('/analyze')
 @cache_result(300)  # Cache por 5 minutos
 def analyze_market():
-    """ENDPOINT PRINCIPAL - Analisis completo con mejoras"""
+    """ENDPOINT PRINCIPAL - Analisis completo con sentimiento integrado"""
     
     # Verificar horario
     market_open = es_horario_mercado()
-    
-    # Para testing, permitir override
     force_analysis = request.args.get('force', 'false').lower() == 'true'
+    include_sentiment = request.args.get('sentiment', 'true').lower() == 'true'
     
     if not market_open and not force_analysis:
         return jsonify({
@@ -418,6 +519,7 @@ def analyze_market():
     signals = []
     errors = []
     total_analyzed = 0
+    sentiment_analyzed = 0
     
     # Permitir filtrar por símbolo específico
     symbols_to_analyze = request.args.get('symbols', '').split(',') if request.args.get('symbols') else SYMBOLS
@@ -443,11 +545,23 @@ def analyze_market():
                 errors.append(f"{symbol}: Error en indicadores")
                 continue
             
-            # Evaluar señal
-            action, confidence, reasons = evaluar_senal_avanzada(indicators)
+            # ANÁLISIS DE SENTIMIENTO (solo para símbolos prioritarios o si se especifica)
+            sentiment_data = None
+            if include_sentiment and symbol in SENTIMENT_PRIORITY_SYMBOLS:
+                try:
+                    sentiment_data = analizar_sentimiento_noticias(symbol)
+                    if sentiment_data and sentiment_data.get('news_count', 0) > 0:
+                        sentiment_analyzed += 1
+                except Exception as e:
+                    logger.warning(f"Sentiment analysis failed for {symbol}: {e}")
             
-            # Umbral de confianza configurable
-            min_confidence = float(request.args.get('min_confidence', 0.4))
+            # Evaluar señal con sentimiento integrado
+            action, confidence, reasons = evaluar_senal_avanzada(indicators, sentiment_data)
+            
+            # Umbral de confianza configurable (más bajo si tenemos sentimiento)
+            min_confidence = float(request.args.get('min_confidence', 0.35))
+            if sentiment_data and sentiment_data.get('confidence', 0) > 0.6:
+                min_confidence = max(0.25, min_confidence - 0.1)  # Reducir umbral con buen sentimiento
             
             if action and confidence >= min_confidence:
                 # Gestión de riesgo
@@ -463,7 +577,7 @@ def analyze_market():
                 sector = info.get('sector', 'Unknown')
                 market_cap = info.get('marketCap', 0)
                 
-                signals.append({
+                signal_data = {
                     "symbol": symbol,
                     "action": action,
                     "current_price": round(indicators['price'], 2),
@@ -484,7 +598,19 @@ def analyze_market():
                     "reasons": reasons,
                     "risk_management": risk_mgmt,
                     "timestamp": datetime.now().isoformat()
-                })
+                }
+                
+                # Agregar datos de sentimiento si están disponibles
+                if sentiment_data and sentiment_data.get('news_count', 0) > 0:
+                    signal_data["sentiment"] = {
+                        "sentiment_score": sentiment_data['sentiment_score'],
+                        "sentiment_label": sentiment_data['sentiment_label'],
+                        "news_count": sentiment_data['news_count'],
+                        "confidence": sentiment_data['confidence'],
+                        "top_news": sentiment_data.get('news_articles', [])[:3]  # Solo top 3
+                    }
+                
+                signals.append(signal_data)
                 
         except Exception as e:
             error_msg = f"Error analizando {symbol}: {str(e)}"
@@ -499,15 +625,17 @@ def analyze_market():
         "signals": signals,
         "actionable_signals": len(signals),
         "total_analyzed": total_analyzed,
+        "sentiment_analyzed": sentiment_analyzed,
         "market_status": "OPEN" if market_open else "CLOSED",
         "analysis_time": datetime.now().isoformat(),
         "errors": errors[:5],  # Solo primeros 5 errores
-        "cache_status": "cached" if f"analyze_market_{str(())}_{str({})}" in CACHE else "fresh"
+        "cache_status": "cached" if f"analyze_market_{str(())}_{str({})}" in CACHE else "fresh",
+        "sentiment_enabled": include_sentiment
     })
 
 @app.route('/analyze/<symbol>')
 def analyze_single_stock(symbol):
-    """Analizar una acción específica en detalle"""
+    """Analizar una acción específica en detalle con sentimiento"""
     try:
         symbol = symbol.upper()
         stock = yf.Ticker(symbol)
@@ -524,14 +652,24 @@ def analyze_single_stock(symbol):
         if not indicators:
             return jsonify({"error": "Error calculando indicadores"}), 500
         
-        # Análisis de sentimiento (opcional)
-        sentiment_data = {}
-        include_sentiment = request.args.get('sentiment', 'false').lower() == 'true'
+        # Análisis de sentimiento (siempre incluido para análisis individual)
+        sentiment_data = None
+        include_sentiment = request.args.get('sentiment', 'true').lower() == 'true'
         if include_sentiment:
-            sentiment_data = analizar_sentimiento_noticias(symbol)
+            try:
+                sentiment_data = analizar_sentimiento_noticias(symbol)
+            except Exception as e:
+                logger.warning(f"Sentiment analysis failed for {symbol}: {e}")
+                sentiment_data = {
+                    'sentiment_score': 0,
+                    'news_count': 0,
+                    'sentiment_label': 'NO_DATA',
+                    'confidence': 0,
+                    'error': str(e)
+                }
         
-        # Señal
-        action, confidence, reasons = evaluar_senal_avanzada(indicators)
+        # Señal con sentimiento integrado
+        action, confidence, reasons = evaluar_senal_avanzada(indicators, sentiment_data)
         
         # Gestión de riesgo
         risk_mgmt = calcular_gestion_riesgo(
@@ -579,9 +717,17 @@ def analyze_single_stock(symbol):
             "analysis_time": datetime.now().isoformat()
         }
         
-        # Agregar datos de sentimiento si se solicitaron
-        if include_sentiment and sentiment_data:
+        # Agregar datos de sentimiento completos
+        if sentiment_data and sentiment_data.get('news_count', 0) > 0:
             response_data["sentiment"] = sentiment_data
+        elif include_sentiment:
+            response_data["sentiment"] = {
+                "sentiment_score": 0,
+                "sentiment_label": "NO_DATA",
+                "news_count": 0,
+                "confidence": 0,
+                "message": "No hay datos de noticias disponibles"
+            }
         
         return jsonify(response_data)
         
@@ -590,8 +736,8 @@ def analyze_single_stock(symbol):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/sentiment/<symbol>')
-def analyze_sentiment(symbol):
-    """Endpoint específico para análisis de sentimiento"""
+def analyze_sentiment_only(symbol):
+    """Endpoint específico para análisis de sentimiento detallado"""
     try:
         symbol = symbol.upper()
         sentiment_data = analizar_sentimiento_noticias(symbol)
@@ -604,6 +750,56 @@ def analyze_sentiment(symbol):
         
     except Exception as e:
         logger.error(f"Error analyzing sentiment for {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/sentiment/batch')
+def analyze_sentiment_batch():
+    """Análisis de sentimiento para múltiples símbolos"""
+    try:
+        symbols_param = request.args.get('symbols', '')
+        if not symbols_param:
+            symbols_to_analyze = SENTIMENT_PRIORITY_SYMBOLS
+        else:
+            symbols_to_analyze = [s.strip().upper() for s in symbols_param.split(',') if s.strip()]
+        
+        batch_results = {}
+        errors = []
+        
+        for symbol in symbols_to_analyze[:10]:  # Máximo 10 para evitar rate limiting
+            try:
+                rate_limit()
+                sentiment_data = analizar_sentimiento_noticias(symbol)
+                batch_results[symbol] = sentiment_data
+            except Exception as e:
+                errors.append(f"{symbol}: {str(e)}")
+                continue
+        
+        # Análisis agregado
+        total_news = sum(data.get('news_count', 0) for data in batch_results.values())
+        avg_sentiment = np.mean([data.get('sentiment_score', 0) for data in batch_results.values() if data.get('news_count', 0) > 0])
+        
+        positive_count = sum(1 for data in batch_results.values() if data.get('sentiment_label') in ['POSITIVO', 'MUY_POSITIVO'])
+        negative_count = sum(1 for data in batch_results.values() if data.get('sentiment_label') in ['NEGATIVO', 'MUY_NEGATIVO'])
+        
+        market_sentiment = "OPTIMISTA" if positive_count > negative_count else "PESIMISTA" if negative_count > positive_count else "NEUTRAL"
+        
+        return jsonify({
+            "symbols_analyzed": list(batch_results.keys()),
+            "individual_results": batch_results,
+            "market_overview": {
+                "total_news_analyzed": total_news,
+                "average_sentiment_score": round(avg_sentiment, 3) if not np.isnan(avg_sentiment) else 0,
+                "market_sentiment": market_sentiment,
+                "positive_stocks": positive_count,
+                "negative_stocks": negative_count,
+                "neutral_stocks": len(batch_results) - positive_count - negative_count
+            },
+            "errors": errors,
+            "analysis_time": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Error in batch sentiment analysis: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/portfolio/correlation')
@@ -693,7 +889,7 @@ def portfolio_correlation():
 
 @app.route('/market/overview')
 def market_overview():
-    """Vista general del mercado"""
+    """Vista general del mercado con sentimiento"""
     try:
         # Índices principales
         indices = {
@@ -723,7 +919,35 @@ def market_overview():
                 logger.error(f"Error getting {symbol}: {e}")
                 continue
         
-        # Análisis de sentimiento general
+        # Análisis de sentimiento general del mercado (opcional)
+        include_sentiment = request.args.get('sentiment', 'false').lower() == 'true'
+        market_sentiment_data = None
+        
+        if include_sentiment:
+            try:
+                # Analizar sentimiento de algunos índices principales
+                sentiment_results = []
+                for symbol in ['SPY', 'QQQ', 'DIA']:  # ETFs principales
+                    try:
+                        sentiment = analizar_sentimiento_noticias(symbol)
+                        if sentiment.get('news_count', 0) > 0:
+                            sentiment_results.append(sentiment)
+                    except:
+                        continue
+                
+                if sentiment_results:
+                    avg_market_sentiment = np.mean([s['sentiment_score'] for s in sentiment_results])
+                    total_market_news = sum(s['news_count'] for s in sentiment_results)
+                    
+                    market_sentiment_data = {
+                        'average_score': round(avg_market_sentiment, 3),
+                        'total_news': total_market_news,
+                        'label': 'POSITIVO' if avg_market_sentiment > 0.5 else 'NEGATIVO' if avg_market_sentiment < -0.5 else 'NEUTRAL'
+                    }
+            except Exception as e:
+                logger.warning(f"Error getting market sentiment: {e}")
+        
+        # Análisis de sentimiento basado en índices
         positive_changes = sum(1 for data in market_data.values() if data['change_percent'] > 0)
         total_indices = len(market_data)
         
@@ -737,13 +961,18 @@ def market_overview():
             sentiment = "Neutral"
             sentiment_emoji = "➡️"
         
-        return jsonify({
+        response = {
             "indices": market_data,
             "market_sentiment": sentiment,
             "sentiment_emoji": sentiment_emoji,
             "market_status": "OPEN" if es_horario_mercado() else "CLOSED",
             "timestamp": datetime.now().isoformat()
-        })
+        }
+        
+        if market_sentiment_data:
+            response["news_sentiment"] = market_sentiment_data
+        
+        return jsonify(response)
         
     except Exception as e:
         logger.error(f"Error in market overview: {e}")
@@ -751,28 +980,44 @@ def market_overview():
 
 @app.route('/health')
 def health_check():
-    """Health check mejorado"""
+    """Health check mejorado con validación de APIs"""
     try:
         # Test básico de conectividad con yfinance
         test_stock = yf.Ticker('AAPL')
         test_data = test_stock.history(period='1d')
+        yfinance_status = "OK" if len(test_data) > 0 else "WARNING"
         
-        api_status = "OK" if len(test_data) > 0 else "WARNING"
+        # Test básico de NewsAPI (solo si hay API key configurada)
+        newsapi_status = "NOT_CONFIGURED"
+        try:
+            # Intentar una llamada simple para verificar conectividad
+            test_sentiment = analizar_sentimiento_noticias('AAPL')
+            if test_sentiment.get('sentiment_label') != 'ERROR':
+                newsapi_status = "OK" if test_sentiment.get('news_count', 0) > 0 else "NO_DATA"
+            else:
+                newsapi_status = "ERROR"
+        except:
+            newsapi_status = "ERROR"
         
         return jsonify({
             "status": "OK",
             "timestamp": datetime.now().isoformat(),
             "market_open": es_horario_mercado(),
             "symbols_count": len(SYMBOLS),
-            "version": "2.1",
-            "yfinance_api": api_status,
+            "priority_symbols_count": len(SENTIMENT_PRIORITY_SYMBOLS),
+            "version": "2.2-sentiment",
+            "apis": {
+                "yfinance": yfinance_status,
+                "newsapi": newsapi_status
+            },
             "cache_size": len(CACHE),
             "features": {
                 "technical_analysis": True,
                 "risk_management": True,
                 "correlation_analysis": True,
                 "sentiment_analysis": True,
-                "market_overview": True
+                "market_overview": True,
+                "batch_sentiment": True
             }
         })
         
@@ -791,7 +1036,8 @@ def ping_endpoint():
         "timestamp": datetime.now().isoformat(),
         "market_open": es_horario_mercado(),
         "symbols_count": len(SYMBOLS),
-        "version": "2.1"
+        "version": "2.2-sentiment",
+        "sentiment_enabled": True
     }
 
 @app.route('/ping')
@@ -811,7 +1057,34 @@ def clear_cache():
         "timestamp": datetime.now().isoformat()
     })
 
+# Endpoint para configurar API key de NewsAPI
+@app.route('/admin/config', methods=['POST'])
+def update_config():
+    """Actualizar configuración (como API keys)"""
+    try:
+        data = request.get_json()
+        
+        # En una implementación real, esto debería guardarse de forma segura
+        # Por ahora solo mostramos cómo sería la estructura
+        
+        return jsonify({
+            "message": "Configuración actualizada",
+            "timestamp": datetime.now().isoformat(),
+            "note": "Implementar almacenamiento seguro de API keys en producción"
+        })
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 10000))
+    
+    # Mostrar información de inicio
+    print(f"🚀 Sistema de Trading con Análisis de Sentimiento v2.2")
+    print(f"📊 Símbolos configurados: {len(SYMBOLS)}")
+    print(f"📰 Símbolos prioritarios para sentimiento: {len(SENTIMENT_PRIORITY_SYMBOLS)}")
+    print(f"🌐 Puerto: {port}")
+    print(f"⚠️  Recuerda configurar tu NewsAPI key en la función analizar_sentimiento_noticias")
+    
     app.run(host='0.0.0.0', port=port, debug=False)
