@@ -331,7 +331,7 @@ def health_check():
 from datetime import datetime
 import pytz
 
-@app.route('/health')
+@app.route('/status')
 def health_check():
     return {
         "status": "OK",
