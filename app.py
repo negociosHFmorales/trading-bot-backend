@@ -332,7 +332,7 @@ from datetime import datetime
 import pytz
 
 @app.route('/status')
-def health_check():
+def ping_endpoint():
     return {
         "status": "OK",
         "timestamp": datetime.now().isoformat(),
