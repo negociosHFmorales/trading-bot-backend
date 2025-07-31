@@ -327,6 +327,7 @@ def health_check():
         "symbols_count": len(SYMBOLS),
         "version": "2.0"
     })
+    
 from datetime import datetime
 import pytz
 
@@ -343,6 +344,7 @@ def health_check():
 @app.route('/ping')
 def ping():
     return {"message": "pong", "timestamp": datetime.now().isoformat()}
+    
 if __name__ == '__main__':
     import os
     port = int(os.environ.get('PORT', 10000))
