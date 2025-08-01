@@ -1084,6 +1084,15 @@ def analyze_single_stock(symbol):
         logger.error(f"Error analyzing {symbol}: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/') 
+def home(): 
+    return "Hello World"
+
+@app.route('/api/posiciones')  # o la ruta que necesites
+def obtener_posiciones():
+    # tu código aquí
+    pass
+    
 @app.route('/sentiment/<symbol>')
 def analyze_sentiment_only(symbol):
     """Endpoint específico para análisis de sentimiento detallado"""
