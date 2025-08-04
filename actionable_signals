@@ -1,3 +1,6 @@
+from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import yfinance as yf
@@ -225,15 +228,39 @@ def calcular_indicadores_avanzados(data):
 # [Aquí van todas las demás funciones de ML que ya tienes...]
 # MACHINE LEARNING FUNCTIONS
 def calcular_rsi_simple(prices, window=14):
-    """RSI simplificado para ML"""
-    delta = prices.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    """RSI simplificado para ML con manejo robusto de errores"""
+    try:
+        if len(prices) < window + 1:
+            return pd.Series([50] * len(prices), index=prices.index)
+        
+        delta = prices.diff()
+        
+        # Manejar casos donde no hay cambios
+        if delta.std() == 0:
+            return pd.Series([50] * len(prices), index=prices.index)
+        
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        
+        # Usar rolling con min_periods
+        avg_gain = gain.rolling(window=window, min_periods=window//2).mean()
+        avg_loss = loss.rolling(window=window, min_periods=window//2).mean()
+        
+        # Evitar división por cero
+        rs = avg_gain / avg_loss.replace(0, 0.01)
+        rsi = 100 - (100 / (1 + rs))
+        
+        # Rellenar NaN con 50
+        rsi = rsi.fillna(50)
+        
+        return rsi
+        
+    except Exception as e:
+        logger.error(f"Error calculating RSI: {e}")
+        return pd.Series([50] * len(prices), index=prices.index)
 
 def crear_features_ml(data):
-    """Crear features para machine learning"""
+    """Crear features para machine learning con manejo robusto de NaN"""
     try:
         if len(data) < 30:
             return None, None
@@ -241,8 +268,67 @@ def crear_features_ml(data):
         # Make a copy to avoid modifying original data
         data_ml = data.copy()
         
-        # Features técnicos
+        # Verificar que tenemos las columnas necesarias
+        required_columns = ['Close', 'Volume', 'High', 'Low']
+        for col in required_columns:
+            if col not in data_ml.columns:
+                logger.error(f"Missing required column: {col}")
+                return None, None
+        
+        # Features técnicos con manejo de NaN
         data_ml['returns'] = data_ml['Close'].pct_change()
+        data_ml['volatility'] = data_ml['returns'].rolling(window=10, min_periods=5).std()
+        data_ml['rsi'] = calcular_rsi_simple(data_ml['Close'])
+        data_ml['sma_5'] = data_ml['Close'].rolling(window=5, min_periods=3).mean()
+        data_ml['sma_10'] = data_ml['Close'].rolling(window=10, min_periods=5).mean()
+        data_ml['volume_sma'] = data_ml['Volume'].rolling(window=10, min_periods=5).mean()
+        
+        # Features adicionales con protección contra división por cero
+        data_ml['price_to_sma5'] = data_ml['Close'] / data_ml['sma_5'].replace(0, np.nan)
+        data_ml['price_to_sma10'] = data_ml['Close'] / data_ml['sma_10'].replace(0, np.nan)
+        data_ml['volume_ratio'] = data_ml['Volume'] / data_ml['volume_sma'].replace(0, np.nan)
+        data_ml['high_low_ratio'] = data_ml['High'] / data_ml['Low'].replace(0, np.nan)
+        
+        # Preparar features matrix
+        features = [
+            'returns', 'volatility', 'rsi', 'price_to_sma5', 
+            'price_to_sma10', 'volume_ratio', 'high_low_ratio'
+        ]
+        
+        # Crear X con manejo robusto de NaN
+        X = data_ml[features].copy()
+        
+        # Target: precio en 3 días
+        y = data_ml['Close'].shift(-3).copy()
+        
+        # Eliminar NaN de ambos datasets
+        common_index = X.index.intersection(y.index)
+        X = X.loc[common_index]
+        y = y.loc[common_index]
+        
+        # Eliminar filas con NaN
+        mask = ~(X.isnull().any(axis=1) | y.isnull())
+        X_clean = X[mask]
+        y_clean = y[mask]
+        
+        # Verificar que tenemos suficientes datos
+        if len(X_clean) < 15:
+            logger.warning(f"Insufficient clean data: {len(X_clean)}")
+            return None, None
+        
+        # Reemplazar infinitos
+        X_clean = X_clean.replace([np.inf, -np.inf], np.nan).dropna()
+        y_clean = y_clean.loc[X_clean.index]
+        
+        if len(X_clean) < 10:
+            return None, None
+        
+        return X_clean, y_clean
+        
+    except Exception as e:
+        logger.error(f"Error creating ML features: {e}")
+        return None, None
+
         data_ml['volatility'] = data_ml['returns'].rolling(window=10).std()
         data_ml['rsi'] = calcular_rsi_simple(data_ml['Close'])
         data_ml['sma_5'] = data_ml['Close'].rolling(window=5).mean()
@@ -277,18 +363,82 @@ def crear_features_ml(data):
         return None, None
 
 def predecir_precio_ml(data, symbol):
-    """Predicción de precio usando ML"""
+    """Predicción de precio usando ML con manejo robusto de errores"""
     try:
         X, y = crear_features_ml(data)
-        if X is None or len(X) < 20:
+        if X is None or len(X) < 15:
             return None
         
-        # Usar últimos 20 días para entrenamiento
-        X_train = X.iloc[-20:]
-        y_train = y.iloc[-20:]
+        # Usar últimos datos disponibles
+        train_size = min(30, len(X))
+        X_train = X.iloc[-train_size:].copy()
+        y_train = y.iloc[-train_size:].copy()
         
-        # Remove any remaining NaN values
-        mask = ~(np.isnan(X_train).any(axis=1) | np.isnan(y_train))
+        # Verificación de datos limpios
+        if X_train.isnull().any().any() or y_train.isnull().any():
+            return None
+        
+        if len(X_train) < 10:
+            return None
+        
+        # Escalado de features
+        try:
+            from sklearn.preprocessing import StandardScaler
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+        except:
+            X_train_scaled = X_train.values
+        
+        # Modelos más simples
+        models = [
+            LinearRegression(),
+            RandomForestRegressor(n_estimators=5, random_state=42, max_depth=3)
+        ]
+        
+        predictions = []
+        
+        for model in models:
+            try:
+                model.fit(X_train_scaled, y_train)
+                last_features = X_train_scaled[-1:].reshape(1, -1)
+                pred = model.predict(last_features)[0]
+                
+                if not np.isnan(pred) and not np.isinf(pred) and pred > 0:
+                    predictions.append(pred)
+            except:
+                continue
+        
+        if not predictions:
+            return None
+        
+        # Calcular resultado
+        precio_predicho = np.mean(predictions)
+        precio_actual = float(data['Close'].iloc[-1])
+        
+        # Validar predicción razonable
+        cambio_pct = abs((precio_predicho - precio_actual) / precio_actual)
+        if cambio_pct > 0.20:
+            precio_predicho = precio_actual * (1.20 if precio_predicho > precio_actual else 0.80)
+        
+        volatilidad = data['Close'].pct_change().std()
+        confianza_ml = max(0.1, 1 - (volatilidad * 10))
+        
+        direccion = "ALCISTA" if precio_predicho > precio_actual else "BAJISTA"
+        cambio_esperado = ((precio_predicho - precio_actual) / precio_actual) * 100
+        
+        return {
+            'precio_actual': round(precio_actual, 2),
+            'precio_predicho': round(precio_predicho, 2),
+            'cambio_esperado_pct': round(cambio_esperado, 2),
+            'direccion': direccion,
+            'confianza_ml': round(confianza_ml, 3),
+            'volatilidad': round(volatilidad, 4)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in ML prediction for {symbol}: {e}")
+        return None
+
         X_train = X_train[mask]
         y_train = y_train[mask]
         
