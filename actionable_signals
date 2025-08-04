@@ -795,7 +795,7 @@ def analyze_market():
             "actionable_signals": 0,
             "total_analyzed": 0,
             "message": "Mercado cerrado - análisis pausado",
-            "market_status": "CLOSED",
+            "market_status": "OPEN",
             "next_open": "9:30 AM ET"
         })
     
