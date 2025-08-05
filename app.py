@@ -1674,3 +1674,28 @@ if __name__ == '__main__':
     print(f"=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=False)
+
+@app.route('/place_order', methods=['POST'])
+def place_order():
+    """Enviar orden real o simulada a Alpaca"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "ERROR", "message": "No se recibió orden"}), 400
+        
+        # Simulación básica
+        order_id = f"sim_order_{int(time_module.time())}"
+        response = {
+            "symbol": data.get("symbol"),
+            "qty": data.get("qty"),
+            "side": data.get("side"),
+            "type": data.get("type", "market"),
+            "order_id": order_id,
+            "status": "SIMULATED_EXECUTED",
+            "price": data.get("price"),
+            "submitted_at": datetime.now().isoformat()
+        }
+        return jsonify(response)
+        
+    except Exception as e:
+        return jsonify({"status": "ERROR", "message": str(e)}), 500
