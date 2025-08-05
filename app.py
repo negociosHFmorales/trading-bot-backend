@@ -1675,50 +1675,15 @@ if __name__ == '__main__':
     
     app.run(host='0.0.0.0', port=port, debug=False)
 
-@app.route('/place_order', methods=['POST'])
-def place_order():
-    """Enviar orden real o simulada a Alpaca"""
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"status": "ERROR", "message": "No se recibió orden"}), 400
-        
-        # Simulación básica
-        order_id = f"sim_order_{int(time_module.time())}"
-        response = {
-            "symbol": data.get("symbol"),
-            "qty": data.get("qty"),
-            "side": data.get("side"),
-            "type": data.get("type", "market"),
-            "order_id": order_id,
-            "status": "SIMULATED_EXECUTED",
-            "price": data.get("price"),
-            "submitted_at": datetime.now().isoformat()
-        }
-        return jsonify(response)
-        
-    except Exception as e:
-        return jsonify({"status": "ERROR", "message": str(e)}), 500
+from flask import Flask, request, jsonify
+app = Flask(__name__)
 
-@app.route('/place_order', methods=['POST'])
+@app.route('/place_order', methods=["POST"])
 def place_order():
-    """Recibir orden simulada desde n8n"""
-    try:
-        data = request.json
-        if not data:
-            return jsonify({"status": "ERROR", "message": "Faltan datos"}), 400
+    data = request.json
+    if not data:
+        return jsonify({"status": "ERROR", "message": "Faltan datos"}), 400
+    return jsonify({"status": "OK", "received": data}), 200
 
-        order_id = f"sim_order_{int(time_module.time())}"
-        return jsonify({
-            "order_id": order_id,
-            "symbol": data.get("symbol"),
-            "qty": data.get("qty"),
-            "side": data.get("side"),
-            "type": data.get("type", "market"),
-            "price": data.get("price"),
-            "status": "SIMULATED_EXECUTED",
-            "submitted_at": datetime.now().isoformat(),
-            "trading_session": "EXTENDED"
-        })
-    except Exception as e:
-        return jsonify({"status": "ERROR", "message": str(e)}), 500
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=port)
