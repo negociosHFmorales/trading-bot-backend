@@ -1723,3 +1723,26 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
 
+@app.route("/place_order", methods=["POST"])
+def place_order():
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "ERROR", "message": "No data received"}), 400
+
+        order_id = f"SIM-{int(time.time())}"
+        response = {
+            "order_id": order_id,
+            "symbol": data.get("symbol"),
+            "qty": data.get("qty"),
+            "side": data.get("side"),
+            "type": data.get("type", "market"),
+            "price": data.get("price"),
+            "status": "SIMULATED_EXECUTED",
+            "submitted_at": datetime.now().isoformat(),
+        }
+        return jsonify(response)
+
+    except Exception as e:
+        return jsonify({"status": "ERROR", "message": str(e)}), 500
+
