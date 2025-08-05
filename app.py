@@ -1674,10 +1674,7 @@ if __name__ == '__main__':
     print(f"=" * 60)
     
     app.run(host='0.0.0.0', port=port, debug=False)
-
-from flask import Flask, request, jsonify
-app = Flask(__name__)
-
+    
 @app.route('/place_order', methods=["POST"])
 def place_order():
     data = request.json
