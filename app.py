@@ -1699,3 +1699,26 @@ def place_order():
         
     except Exception as e:
         return jsonify({"status": "ERROR", "message": str(e)}), 500
+
+@app.route('/place_order', methods=['POST'])
+def place_order():
+    """Recibir orden simulada desde n8n"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({"status": "ERROR", "message": "Faltan datos"}), 400
+
+        order_id = f"sim_order_{int(time_module.time())}"
+        return jsonify({
+            "order_id": order_id,
+            "symbol": data.get("symbol"),
+            "qty": data.get("qty"),
+            "side": data.get("side"),
+            "type": data.get("type", "market"),
+            "price": data.get("price"),
+            "status": "SIMULATED_EXECUTED",
+            "submitted_at": datetime.now().isoformat(),
+            "trading_session": "EXTENDED"
+        })
+    except Exception as e:
+        return jsonify({"status": "ERROR", "message": str(e)}), 500
