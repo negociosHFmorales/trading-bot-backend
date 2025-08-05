@@ -1687,3 +1687,9 @@ def place_order():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=port)
+
+import os
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))  # Usa el puerto que Render pasa como variable de entorno
+    app.run(host="0.0.0.0", port=port, debug=False)
