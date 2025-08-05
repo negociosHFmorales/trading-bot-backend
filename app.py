@@ -1723,26 +1723,64 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port, debug=False)
 
-@app.route("/place_order", methods=["POST"])
+@app.route('/place_order', methods=['POST'])
 def place_order():
+    """Endpoint para colocar órdenes de trading - Simulado para paper trading"""
     try:
         data = request.json
         if not data:
-            return jsonify({"status": "ERROR", "message": "No data received"}), 400
+            return jsonify({
+                "status": "ERROR", 
+                "message": "No data received",
+                "timestamp": datetime.now().isoformat()
+            }), 400
 
-        order_id = f"SIM-{int(time.time())}"
+        # Validar campos requeridos
+        required_fields = ['symbol', 'qty', 'side']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    "status": "ERROR",
+                    "message": f"Missing required field: {field}",
+                    "timestamp": datetime.now().isoformat()
+                }), 400
+
+        # Crear orden simulada
+        order_id = f"SIM-{int(time_module.time())}"
+        
+        # Obtener precio actual para la simulación
+        try:
+            stock = yf.Ticker(data['symbol'].upper())
+            current_data = stock.history(period='1d')
+            current_price = float(current_data['Close'].iloc[-1]) if len(current_data) > 0 else data.get('price', 100.0)
+        except:
+            current_price = data.get('price', 100.0)
+
         response = {
             "order_id": order_id,
-            "symbol": data.get("symbol"),
-            "qty": data.get("qty"),
-            "side": data.get("side"),
-            "type": data.get("type", "market"),
-            "price": data.get("price"),
+            "symbol": data['symbol'].upper(),
+            "qty": int(data['qty']),
+            "side": data['side'].upper(),
+            "type": data.get('type', 'market').upper(),
+            "price": round(current_price, 2),
             "status": "SIMULATED_EXECUTED",
+            "order_success": True,
+            "order_type": data.get('type', 'market'),
+            "order_status": "FILLED",
             "submitted_at": datetime.now().isoformat(),
+            "filled_at": datetime.now().isoformat(),
+            "trading_session": "REGULAR" if es_horario_tradicional() else "EXTENDED",
+            "message": "Orden simulada ejecutada exitosamente"
         }
-        return jsonify(response)
+        
+        logger.info(f"Simulated order placed: {order_id} - {data['symbol']} {data['side']} {data['qty']}")
+        return jsonify(response), 200
 
     except Exception as e:
-        return jsonify({"status": "ERROR", "message": str(e)}), 500
-
+        logger.error(f"Error placing order: {e}")
+        return jsonify({
+            "status": "ERROR",
+            "order_success": False,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
