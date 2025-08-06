@@ -1,4 +1,4 @@
-# ARCHIVO app.py - VERSIÓN MODIFICADA PARA CHARLES SCHWAB API
+# ARCHIVO app.py - VERSIÓN CORREGIDA PARA CHARLES SCHWAB API
 # ============================================================
 
 from sklearn.linear_model import LinearRegression
@@ -611,7 +611,7 @@ def generate_trading_signal(symbol, data, indicators, ai_prediction):
         return None
 
 # ============================================================
-# ENDPOINTS PRINCIPALES - MODIFICADOS PARA SCHWAB
+# ENDPOINTS PRINCIPALES - CORREGIDOS PARA SCHWAB
 # ============================================================
 
 @app.route('/')
@@ -682,4 +682,478 @@ def health_check():
                 "health": "ACTIVE",
                 "dashboard": "ACTIVE",
                 "schwab_account": "ACTIVE"
+            },
+            "schwab_integration": schwab_status,
+            "market_status": "OPEN" if es_horario_mercado() else "CLOSED",
+            "traditional_hours": es_horario_tradicional(),
+            "symbols_count": len(SYMBOLS),
+            "cache_entries": len(CACHE)
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "ERROR",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }), 500
+
+@app.route('/analyze')
+@cache_result(duration=60)  # Cache por 1 minuto
+def analyze_stocks():
+    """Análisis completo de acciones con IA y señales de trading - CORREGIDO"""
+    try:
+        # Parámetros de request
+        force = request.args.get('force', 'false').lower() == 'true'
+        ai_enabled = request.args.get('ai', 'true').lower() == 'true'
+        sentiment_enabled = request.args.get('sentiment', 'false').lower() == 'true'
+        min_confidence = float(request.args.get('min_confidence', '0.4'))
+        symbols_param = request.args.get('symbols', '')
+        
+        # Determinar símbolos a analizar
+        if symbols_param:
+            symbols_to_analyze = [s.strip().upper() for s in symbols_param.split(',')]
+        else:
+            symbols_to_analyze = SYMBOLS[:10]  # Primeros 10 para evitar timeout
+        
+        logger.info(f"Analyzing {len(symbols_to_analyze)} symbols with AI={ai_enabled}, min_confidence={min_confidence}")
+        
+        # Resultados
+        results = {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "market_status": "OPEN" if es_horario_mercado() else "CLOSED",
+            "traditional_hours": es_horario_tradicional(),
+            "extended_hours_available": True,  # Schwab permite extended hours
+            "symbols_analyzed": len(symbols_to_analyze),
+            "signals": [],
+            "actionable_signals": 0,
+            "analysis_summary": {},
+            "schwab_status": "CONFIGURED" if SCHWAB_CONFIG.get('access_token') else "NEEDS_AUTH"
+        }
+        
+        signals_generated = []
+        successful_analysis = 0
+        
+        for symbol in symbols_to_analyze:
+            try:
+                rate_limit()  # Rate limiting
+                
+                # Obtener datos históricos
+                stock_data = get_stock_data(symbol, period='5d')
+                if stock_data is None or stock_data.empty:
+                    logger.warning(f"No data available for {symbol}")
+                    continue
+                
+                # Calcular indicadores técnicos
+                indicators = calculate_technical_indicators(stock_data)
+                if indicators is None:
+                    logger.warning(f"Could not calculate indicators for {symbol}")
+                    continue
+                
+                # Generar predicción de IA si está habilitada
+                ai_prediction = None
+                if ai_enabled:
+                    ai_prediction = generate_ai_prediction(stock_data, symbol)
+                
+                # Generar señal de trading
+                signal = generate_trading_signal(symbol, stock_data, indicators, ai_prediction)
+                
+                if signal and signal.get('confidence', 0) >= min_confidence:
+                    signals_generated.append(signal)
+                    successful_analysis += 1
+                    logger.info(f"Generated signal for {symbol}: {signal['action']} (confidence: {signal['confidence']})")
+                
+            except Exception as e:
+                logger.error(f"Error analyzing {symbol}: {e}")
+                continue
+        
+        # Filtrar señales por confianza
+        results["signals"] = signals_generated
+        results["actionable_signals"] = len(signals_generated)
+        results["successful_analysis"] = successful_analysis
+        
+        # Resumen del análisis
+        if signals_generated:
+            buy_signals = len([s for s in signals_generated if s['action'] == 'BUY'])
+            sell_signals = len([s for s in signals_generated if s['action'] == 'SELL'])
+            avg_confidence = sum(s['confidence'] for s in signals_generated) / len(signals_generated)
             
+            results["analysis_summary"] = {
+                "buy_signals": buy_signals,
+                "sell_signals": sell_signals,
+                "average_confidence": round(avg_confidence, 3),
+                "high_confidence_signals": len([s for s in signals_generated if s['confidence'] >= 0.7]),
+                "symbols_with_signals": list(set(s['symbol'] for s in signals_generated))
+            }
+        
+        logger.info(f"Analysis complete: {results['actionable_signals']} actionable signals generated")
+        return jsonify(results)
+        
+    except Exception as e:
+        logger.error(f"Error in analyze_stocks: {e}")
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "timestamp": datetime.now().isoformat(),
+            "actionable_signals": 0
+        }), 500
+
+@app.route('/schwab/account')
+def schwab_account():
+    """Obtener información de cuenta de Schwab"""
+    try:
+        if not SCHWAB_CONFIG.get('access_token'):
+            return jsonify({
+                "error": True,
+                "message": "Schwab access token not configured",
+                "status": "NEEDS_AUTH"
+            }), 401
+        
+        account_info = get_schwab_account_info()
+        
+        if account_info:
+            return jsonify({
+                "status": "success",
+                "timestamp": datetime.now().isoformat(),
+                "account_info": account_info,
+                "schwab_status": "AUTHENTICATED"
+            })
+        else:
+            return jsonify({
+                "error": True,
+                "message": "Failed to retrieve Schwab account information",
+                "status": "AUTH_FAILED"
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error getting Schwab account info: {e}")
+        return jsonify({
+            "error": True,
+            "message": str(e),
+            "status": "ERROR"
+        }), 500
+
+@app.route('/place_order', methods=['POST'])
+def place_order():
+    """Colocar orden en Schwab - ENDPOINT PRINCIPAL PARA N8N"""
+    try:
+        # Verificar autenticación de Schwab
+        if not SCHWAB_CONFIG.get('access_token'):
+            return jsonify({
+                "error": True,
+                "message": "Schwab not authenticated. Configure access_token first.",
+                "status": "NEEDS_AUTH"
+            }), 401
+        
+        # Obtener datos del request
+        data = request.get_json()
+        if not data:
+            return jsonify({
+                "error": True,
+                "message": "No JSON data provided"
+            }), 400
+        
+        # Validar campos requeridos
+        required_fields = ['symbol', 'quantity', 'side']
+        for field in required_fields:
+            if field not in data:
+                return jsonify({
+                    "error": True,
+                    "message": f"Missing required field: {field}"
+                }), 400
+        
+        symbol = data['symbol'].upper()
+        quantity = int(data['quantity'])
+        side = data['side'].upper()
+        order_type = data.get('order_type', 'MARKET').upper()
+        
+        # Validar valores
+        if side not in ['BUY', 'SELL']:
+            return jsonify({
+                "error": True,
+                "message": "side must be 'BUY' or 'SELL'"
+            }), 400
+        
+        if quantity <= 0:
+            return jsonify({
+                "error": True,
+                "message": "quantity must be greater than 0"
+            }), 400
+        
+        # Verificar horario de mercado para órdenes reales
+        if not es_horario_mercado():
+            return jsonify({
+                "error": True,
+                "message": "Market is closed. Trading not allowed at this time.",
+                "market_status": "CLOSED"
+            }), 400
+        
+        # Colocar orden en Schwab
+        logger.info(f"Placing Schwab order: {symbol} {quantity} {side} {order_type}")
+        result = place_schwab_order(symbol, quantity, side, order_type)
+        
+        if result and not result.get('error'):
+            # Orden exitosa
+            response = {
+                "status": "success",
+                "message": "Order placed successfully with Charles Schwab",
+                "timestamp": datetime.now().isoformat(),
+                "order_details": result,
+                "broker": "CHARLES_SCHWAB",
+                "market_session": "REGULAR" if es_horario_tradicional() else "EXTENDED"
+            }
+            
+            logger.info(f"Schwab order successful: {result.get('order_id')}")
+            return jsonify(response)
+        
+        else:
+            # Error en la orden
+            error_response = {
+                "error": True,
+                "message": result.get('message', 'Unknown error placing order'),
+                "timestamp": datetime.now().isoformat(),
+                "broker": "CHARLES_SCHWAB",
+                "order_details": result if result else None
+            }
+            
+            logger.error(f"Schwab order failed: {result}")
+            return jsonify(error_response), 400
+            
+    except Exception as e:
+        logger.error(f"Error in place_order endpoint: {e}")
+        return jsonify({
+            "error": True,
+            "message": str(e),
+            "timestamp": datetime.now().isoformat(),
+            "broker": "CHARLES_SCHWAB"
+        }), 500
+
+@app.route('/schwab/oauth/start')
+def start_oauth():
+    """Iniciar el flujo OAuth de Schwab"""
+    try:
+        if not SCHWAB_CONFIG['client_id']:
+            return jsonify({
+                "error": True,
+                "message": "Schwab client_id not configured"
+            }), 400
+        
+        # Generar URL de autorización
+        params = {
+            'client_id': SCHWAB_CONFIG['client_id'],
+            'redirect_uri': SCHWAB_CONFIG['redirect_uri'],
+            'response_type': 'code',
+            'scope': 'AccountAccess'
+        }
+        
+        auth_url = f"{SCHWAB_CONFIG['auth_url']}?" + urllib.parse.urlencode(params)
+        
+        return jsonify({
+            "status": "success",
+            "message": "Visit this URL to authorize the application",
+            "authorization_url": auth_url,
+            "instructions": [
+                "1. Click the authorization URL",
+                "2. Login to your Schwab account",
+                "3. Authorize the application",
+                "4. Copy the authorization code from the redirect URL",
+                "5. Use the code in /schwab/oauth/token endpoint"
+            ]
+        })
+        
+    except Exception as e:
+        logger.error(f"Error starting OAuth: {e}")
+        return jsonify({
+            "error": True,
+            "message": str(e)
+        }), 500
+
+@app.route('/schwab/oauth/token', methods=['POST'])
+def exchange_oauth_token():
+    """Intercambiar código de autorización por tokens"""
+    try:
+        data = request.get_json()
+        if not data or 'code' not in data:
+            return jsonify({
+                "error": True,
+                "message": "Authorization code required"
+            }), 400
+        
+        auth_code = data['code']
+        
+        # Preparar request para tokens
+        auth_string = f"{SCHWAB_CONFIG['client_id']}:{SCHWAB_CONFIG['client_secret']}"
+        auth_b64 = base64.b64encode(auth_string.encode()).decode()
+        
+        headers = {
+            'Authorization': f'Basic {auth_b64}',
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        
+        data_payload = {
+            'grant_type': 'authorization_code',
+            'code': auth_code,
+            'redirect_uri': SCHWAB_CONFIG['redirect_uri']
+        }
+        
+        response = requests.post(SCHWAB_CONFIG['token_url'], headers=headers, data=data_payload)
+        
+        if response.status_code == 200:
+            token_data = response.json()
+            
+            # Actualizar configuración
+            SCHWAB_CONFIG['access_token'] = token_data['access_token']
+            SCHWAB_CONFIG['refresh_token'] = token_data['refresh_token']
+            
+            logger.info("Schwab OAuth tokens obtained successfully")
+            
+            return jsonify({
+                "status": "success",
+                "message": "Tokens obtained successfully",
+                "token_info": {
+                    "token_type": token_data.get('token_type'),
+                    "expires_in": token_data.get('expires_in'),
+                    "scope": token_data.get('scope')
+                },
+                "next_steps": [
+                    "1. Tokens are now configured",
+                    "2. Test with /schwab/account endpoint",
+                    "3. Configure your account_hash",
+                    "4. Start trading with /place_order"
+                ]
+            })
+        else:
+            logger.error(f"Failed to exchange OAuth code: {response.status_code} - {response.text}")
+            return jsonify({
+                "error": True,
+                "message": "Failed to exchange authorization code",
+                "details": response.text
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"Error exchanging OAuth token: {e}")
+        return jsonify({
+            "error": True,
+            "message": str(e)
+        }), 500
+
+# ============================================================
+# ENDPOINTS ADICIONALES Y UTILIDADES
+# ============================================================
+
+@app.route('/signals/history')
+def signals_history():
+    """Historial de señales generadas (simulado)"""
+    try:
+        # Por ahora devolvemos un historial simulado
+        # En producción, esto vendría de una base de datos
+        history = {
+            "status": "success",
+            "timestamp": datetime.now().isoformat(),
+            "total_signals": 156,
+            "last_24h": 23,
+            "success_rate": 67.3,
+            "recent_signals": [
+                {
+                    "timestamp": "2024-08-05T14:30:00",
+                    "symbol": "AAPL",
+                    "action": "BUY",
+                    "confidence": 0.78,
+                    "result": "PENDING"
+                },
+                {
+                    "timestamp": "2024-08-05T13:45:00",
+                    "symbol": "MSFT",
+                    "action": "SELL",
+                    "confidence": 0.65,
+                    "result": "PROFIT"
+                }
+            ],
+            "broker": "CHARLES_SCHWAB"
+        }
+        
+        return jsonify(history)
+        
+    except Exception as e:
+        return jsonify({
+            "error": True,
+            "message": str(e)
+        }), 500
+
+@app.route('/test/connection')
+def test_connection():
+    """Test de conexión completo"""
+    try:
+        tests = {
+            "flask_app": "✅ OK",
+            "yfinance": "❌ Testing...",
+            "schwab_auth": "❌ Testing...",
+            "market_data": "❌ Testing...",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Test yfinance
+        try:
+            test_stock = yf.Ticker("AAPL")
+            test_data = test_stock.history(period="1d")
+            if not test_data.empty:
+                tests["yfinance"] = "✅ OK"
+            else:
+                tests["yfinance"] = "❌ No data"
+        except Exception as e:
+            tests["yfinance"] = f"❌ Error: {str(e)[:50]}"
+        
+        # Test Schwab auth
+        if SCHWAB_CONFIG.get('access_token'):
+            account_info = get_schwab_account_info()
+            if account_info:
+                tests["schwab_auth"] = "✅ Authenticated"
+            else:
+                tests["schwab_auth"] = "❌ Auth failed"
+        else:
+            tests["schwab_auth"] = "⚠️ Not configured"
+        
+        # Test market data
+        try:
+            sample_data = get_stock_data("MSFT")
+            if sample_data is not None and not sample_data.empty:
+                tests["market_data"] = "✅ OK"
+            else:
+                tests["market_data"] = "❌ No data"
+        except Exception as e:
+            tests["market_data"] = f"❌ Error: {str(e)[:50]}"
+        
+        return jsonify(tests)
+        
+    except Exception as e:
+        return jsonify({
+            "error": True,
+            "message": str(e)
+        }), 500
+
+# ============================================================
+# INICIO DE LA APLICACIÓN
+# ============================================================
+
+if __name__ == '__main__':
+    try:
+        logger.info("🚀 Starting AI Trading System with Charles Schwab Integration")
+        logger.info(f"📊 Configured for {len(SYMBOLS)} symbols")
+        logger.info(f"🏦 Schwab Status: {'CONFIGURED' if SCHWAB_CONFIG.get('access_token') else 'NEEDS_AUTH'}")
+        logger.info("🔗 Available endpoints:")
+        logger.info("   - / (Dashboard)")
+        logger.info("   - /health (Health check)")
+        logger.info("   - /analyze (Analysis & signals)")
+        logger.info("   - /place_order (Execute orders)")
+        logger.info("   - /schwab/account (Account info)")
+        logger.info("   - /schwab/oauth/start (Start OAuth)")
+        logger.info("   - /schwab/oauth/token (Exchange tokens)")
+        logger.info("   - /test/connection (Connection test)")
+        
+        # Ejecutar en puerto 5000 para desarrollo, o el puerto de Render
+        import os
+        port = int(os.environ.get('PORT', 5000))
+        app.run(host='0.0.0.0', port=port, debug=False)
+        
+    except Exception as e:
+        logger.error(f"Failed to start application: {e}")
+        raise
