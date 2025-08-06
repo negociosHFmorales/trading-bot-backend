@@ -1,6 +1,9 @@
+
 Flask>=2.0.0
 yfinance>=0.2.0
 pandas>=1.5.0
 numpy
 flask-cors
 pytz
+scikit-learn>=1.0.0
+requests>=2.25.0
